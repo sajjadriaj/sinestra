@@ -1,0 +1,14 @@
+services:
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: sqlite:////data/sinestra.db
+      UPLOAD_DIR: /data/books
+    volumes: [sinestra-data:/data]
+    ports: ["8013:8000"]  # same port as `npm run dev`, so /docs is where you expect it
+  web:
+    build: ./frontend
+    ports: ["5173:80"]
+    depends_on: [api]
+volumes:
+  sinestra-data:
