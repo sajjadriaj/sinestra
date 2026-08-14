@@ -145,4 +145,4 @@ This is a personal reader that works, not a finished product.
 
 ## License
 
-Not yet chosen. The sample text in `samples/` is public domain.
+MIT — see [LICENSE](LICENSE). The sample text in `samples/` is public domain.
