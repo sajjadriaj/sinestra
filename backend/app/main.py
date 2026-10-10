@@ -80,7 +80,10 @@ def book_asset(book_id:int,asset:str,db:Session=Depends(get_db)):
     return Response(data,media_type=mimetypes.guess_type(asset)[0] or "application/octet-stream",headers={"Cache-Control":"public, max-age=604800"})
 @app.delete("/api/books/{book_id}",status_code=204)
 def delete_book(book_id:int,db:Session=Depends(get_db)):
-    book=get_book(book_id,db); path=UPLOADS/book.filename; db.delete(book); db.commit(); path.unlink(missing_ok=True); return Response(status_code=204)
+    book=get_book(book_id,db); path=UPLOADS/book.filename; db.delete(book)
+    # SQLite hands a deleted top id to the next upload, which would inherit these cached recaps
+    db.query(Setting).filter(Setting.key.like(f"recap:{book_id}:%")).delete(synchronize_session=False)
+    db.commit(); path.unlink(missing_ok=True); return Response(status_code=204)
 @app.put("/api/books/{book_id}/progress")
 def save_progress(book_id:int,data:ProgressIn,db:Session=Depends(get_db)):
     book=get_book(book_id,db); p=book.progress or Progress(book_id=book_id); p.chapter_index=data.chapter_index;p.locator=data.locator;p.percentage=max(0,min(100,data.percentage));p.updated_at=datetime.utcnow();db.add(p);db.commit();return {"chapter_index":p.chapter_index,"locator":p.locator,"percentage":p.percentage}
@@ -116,11 +119,20 @@ def export_markdown(book_id:int,db:Session=Depends(get_db)):
 @app.post("/api/books/{book_id}/bookmarks",status_code=201)
 def add_bookmark(book_id:int,data:BookmarkIn,db:Session=Depends(get_db)):
     get_book(book_id,db); b=Bookmark(book_id=book_id,**data.model_dump());db.add(b);db.commit();db.refresh(b);return {"id":b.id,**data.model_dump()}
+@app.delete("/api/bookmarks/{bookmark_id}",status_code=204)
+def remove_bookmark(bookmark_id:int,db:Session=Depends(get_db)):
+    b=db.get(Bookmark,bookmark_id)
+    if not b: raise HTTPException(404,"Bookmark not found")
+    db.delete(b);db.commit();return Response(status_code=204)
 @app.get("/api/books/{book_id}/search")
 def search_book(book_id:int,q:str,db:Session=Depends(get_db)):
-    get_book(book_id,db); chapters=db.scalars(select(Chapter).where(Chapter.book_id==book_id,Chapter.content.ilike(f"%{q}%"))).all();results=[]
-    for c in chapters:
-        idx=c.content.lower().find(q.lower()); results.append({"chapter_index":c.position,"chapter":c.title,"excerpt":c.content[max(0,idx-80):idx+len(q)+120]})
+    get_book(book_id,db); q=q.strip(); results=[]
+    if not q: return results
+    # match in Python, not with LIKE: "%" and "_" in a query are text, and SQLite's LIKE only folds ASCII case
+    for c in db.scalars(select(Chapter).where(Chapter.book_id==book_id).order_by(Chapter.position)):
+        idx=c.content.lower().find(q.lower())
+        if idx<0: continue
+        start=max(0,idx-80); results.append({"chapter_index":c.position,"chapter":c.title,"excerpt":("…" if start else "")+c.content[start:idx+len(q)+120].replace("\n"," ")+"…"})
     return results
 @app.get("/api/settings")
 def read_settings(db:Session=Depends(get_db)):
@@ -141,8 +153,9 @@ def free_models():
 def ask_book(book_id:int,data:AskIn,db:Session=Depends(get_db)):
     get_book(book_id,db); stmt=select(Chapter).where(Chapter.book_id==book_id)
     if data.spoiler_protection: stmt=stmt.where(Chapter.position<=data.chapter_index)
-    chapters=db.scalars(stmt.order_by(Chapter.position)).all();terms=set(re.findall(r"[a-z]{4,}",data.question.lower()))
-    ranked=sorted(chapters,key=lambda c:sum(c.content.lower().count(t) for t in terms),reverse=True)[:3]
+    chapters=db.scalars(stmt.order_by(Chapter.position)).all();terms=set(re.findall(r"[^\W\d_]{4,}",f"{data.question} {data.selected_text}".lower()))
+    # ties (a short question, no usable terms) go to the chapters nearest the reader, not the opening ones
+    ranked=sorted(chapters,key=lambda c:(sum(c.content.lower().count(t) for t in terms),c.position<=data.chapter_index,c.position),reverse=True)[:3]
     sources=[{"chapter_index":c.position,"chapter":c.title,"excerpt":c.content[:260]} for c in ranked]
     context=data.selected_text or (sources[0]["excerpt"] if sources else "the text read so far")
     if not openrouter_key(db): return {"answer":f"Based on the book, this passage points to: {context[:300]}","sources":sources,"mock":True}
@@ -201,6 +214,6 @@ def recap(book_id:int,chapter_index:int=0,refresh:bool=False,db:Session=Depends(
     system=("Remind a reader what happened in the part of the book they have already read, so they can pick it back up. "
       "Second person, present tense, 3 short sentences, no preamble, no spoilers beyond the excerpts given.")
     answer,failed=chat(db,system,prompt,320)
-    if failed: return {"recap":answer,"chapters":len(read),"error":True}
+    if failed: return {"recap":"","chapters":len(read),"error":True,"detail":answer}
     db.merge(Setting(key=cache,value=answer)); db.commit()
     return {"recap":answer,"chapters":len(read)}

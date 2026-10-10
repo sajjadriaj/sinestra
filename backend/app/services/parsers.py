@@ -4,6 +4,10 @@ from bs4 import BeautifulSoup
 
 BLOCKS = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "pre", "dd", "dt"]
 
+def _title_case(s: str):
+    """"A DEEPNESS IN THE SKY" -> "A Deepness in the Sky": small words stay small unless they lead."""
+    return re.sub(r"(?<=\s)(A|An|And|As|At|But|By|For|In|Of|On|Or|The|To)\b", lambda m: m.group().lower(), s.title())
+
 def _split_text(text: str):
     parts = [p.strip() for p in re.split(r"(?im)(?=^\s*(?:chapter|part)\s+[\wivxlcdm]+\b)", text) if p.strip()]
     out = []
@@ -124,8 +128,16 @@ def parse_book(filename: str, path: Path):
     suffix = Path(filename).suffix.lower()
     title = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
     author = "Unknown author"
+    if title.islower(): title = _title_case(title)  # "the-yellow-wallpaper.txt" -> "The Yellow Wallpaper"
     if suffix in {".txt", ".md"}:
-        return title, author, _split_text(path.read_bytes().decode("utf-8", errors="replace")), None
+        chapters = _split_text(path.read_bytes().decode("utf-8", errors="replace"))
+        # a short preamble before the first chapter is a title page: title on top, author below it
+        lead, body = chapters[0]
+        if len(chapters) > 1 and len(body) < 200 and not re.match(r"(?i)(chapter|part)\s", lead):
+            title = _title_case(lead.strip("# ")) if lead.isupper() else lead.strip("# ")
+            if body != lead and "\n" not in body: author = body.removeprefix("by ").removeprefix("By ")
+            chapters = chapters[1:]
+        return title, author, chapters, None
     if suffix == ".pdf":
         from pypdf import PdfReader
         reader = PdfReader(path)

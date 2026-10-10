@@ -83,3 +83,19 @@ def test_deleting_book_removes_it(client):
     book = upload_text(client)
     assert client.delete(f"/api/books/{book['id']}").status_code == 204
     assert client.get("/api/books").json() == []
+
+def test_title_page_search_literals_bookmark_delete_and_recap_cleanup(client):
+    body = b"THE YELLOW WALLPAPER\nCharlotte Perkins Gilman\n\nCHAPTER 1\nIt costs 100% of my patience_ to rest.\n\nCHAPTER 2\nJohn laughs at me."
+    book = client.post("/api/books", files={"file": ("the-yellow-wallpaper.txt", BytesIO(body), "text/plain")}).json()
+    assert (book["title"], book["author"], len(book["chapters"])) == ("The Yellow Wallpaper", "Charlotte Perkins Gilman", 2)
+    # % and _ are text, not LIKE wildcards
+    assert [r["chapter_index"] for r in client.get(f"/api/books/{book['id']}/search", params={"q": "100%"}).json()] == [0]
+    assert client.get(f"/api/books/{book['id']}/search", params={"q": "J_hn"}).json() == []
+    mark = client.post(f"/api/books/{book['id']}/bookmarks", json={"chapter_index": 1, "locator": "page:0"}).json()
+    assert client.delete(f"/api/bookmarks/{mark['id']}").status_code == 204
+    assert client.get(f"/api/books/{book['id']}").json()["bookmarks"] == []
+    from app.database import SessionLocal
+    from app.models import Setting
+    with SessionLocal() as db: db.add(Setting(key=f"recap:{book['id']}:1", value="stale")); db.commit()
+    client.delete(f"/api/books/{book['id']}")
+    with SessionLocal() as db: assert db.get(Setting, f"recap:{book['id']}:1") is None

@@ -41,3 +41,20 @@ test('on mobile the toolbar carries every control and contents starts closed',as
   await userEvent.click(screen.getByRole('button',{name:'Toggle contents'}));
   expect(screen.getByText('Contents',{selector:'.tabs button'})).toBeInTheDocument();
 });
+test('shortcuts ignore modified keys, and bookmarks are listed and removable',async()=>{
+  const emma={id:1,title:'Emma',author:'Jane Austen',format:'TXT',created_at:'2026-01-01',progress:{chapter_index:0,percentage:20},chapters:[{id:1,title:'Chapter 1',position:0,content:'Emma Woodhouse.'}],highlights:[],bookmarks:[{id:4,chapter_index:0,locator:'page:0/of:1',label:'Chapter 1 · p.1'}]};
+  (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ok:true,status:200,json:async()=>[emma]});
+  render(<App/>);
+  await userEvent.click(await screen.findByRole('button',{name:/open emma/i}));
+  await userEvent.keyboard('{Control>}a{/Control}');
+  expect(screen.queryByRole('complementary',{name:'Reader companion'})).not.toBeInTheDocument();  // Ctrl+A is select-all, not "Ask AI"
+  await userEvent.keyboard('a');
+  expect(screen.getByRole('complementary',{name:'Reader companion'})).toBeInTheDocument();
+  await userEvent.keyboard('{Escape}');
+  expect(screen.queryByRole('complementary',{name:'Reader companion'})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button',{name:'Toggle contents'}));
+  await userEvent.click(screen.getByRole('tab',{name:/notes/i}));
+  await userEvent.click(screen.getByRole('button',{name:'Remove bookmark Chapter 1 · p.1'}));
+  expect(screen.queryByText('Chapter 1 · p.1')).not.toBeInTheDocument();
+  expect(globalThis.fetch).toHaveBeenCalledWith('/api/bookmarks/4',{method:'DELETE'});
+});
