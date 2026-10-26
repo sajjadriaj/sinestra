@@ -29,6 +29,14 @@ def test_spoiler_protection_filters_future_chapters(client):
     unrestricted = client.post(f"/api/books/{book['id']}/ask", json={"question": "Who waited on Bingley?", "selected_text": "", "chapter_index": 0, "spoiler_protection": False}).json()
     assert any(source["chapter_index"] == 1 for source in unrestricted["sources"])
 
+def test_ask_centers_excerpt_on_deep_match_and_ignores_stopwords(client):
+    filler = "This chapter has many words about what could have been explained. " * 60
+    body = f"CHAPTER 1\n{filler}\n\nCHAPTER 2\n{'Introductory prose. ' * 140}The Qeng Ho fleet arrived at Arachna."
+    book = client.post("/api/books", files={"file": ("Deepness.txt", BytesIO(body.encode()), "text/plain")}).json()
+    res = client.post(f"/api/books/{book['id']}/ask", json={"question": "What happened when the Qeng Ho arrived?", "chapter_index": 1, "spoiler_protection": True}).json()
+    assert res["sources"][0]["chapter_index"] == 1
+    assert "Qeng Ho" in res["sources"][0]["excerpt"]
+
 def test_openrouter_key_switches_ask_off_mock_and_reports_failures(client, monkeypatch):
     import httpx
     from app import main

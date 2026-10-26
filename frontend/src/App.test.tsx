@@ -19,7 +19,8 @@ test('opens reader and changes theme',async()=>{
   expect(document.documentElement).toHaveAttribute('data-theme','night');
 });
 test('a saved highlight comes back painted into the text, with its note',async()=>{
-  (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ok:true,json:async()=>[{id:1,title:'Emma',author:'Jane Austen',format:'TXT',created_at:'2026-01-01',progress:{chapter_index:0,percentage:20},chapters:[{id:1,title:'Chapter 1',position:0,content:'Emma Woodhouse, handsome, clever, and rich.'}],highlights:[{id:9,chapter_index:0,text:'handsome, clever',anchor:'quote:handsome',color:'yellow',note:'The famous opening line.'}],bookmarks:[]}]});
+  const fetchMock=globalThis.fetch as ReturnType<typeof vi.fn>;
+  fetchMock.mockResolvedValueOnce({ok:true,json:async()=>[{id:1,title:'Emma',author:'Jane Austen',format:'TXT',created_at:'2026-01-01',progress:{chapter_index:0,percentage:20},chapters:[{id:1,title:'Chapter 1',position:0,content:'Emma Woodhouse, handsome, clever, and rich.'}],highlights:[{id:9,chapter_index:0,text:'handsome, clever',anchor:'quote:handsome',color:'yellow',note:'The famous opening line.'}],bookmarks:[]}]});
   render(<App/>);
   await userEvent.click(await screen.findByRole('button',{name:/open emma/i}));
   const painted=screen.getByText('handsome, clever');
@@ -28,6 +29,13 @@ test('a saved highlight comes back painted into the text, with its note',async()
   expect(painted.parentElement?.textContent).toBe('Emma Woodhouse, handsome, clever✳, and rich.');
   await userEvent.click(painted);
   expect(screen.getByText('The famous opening line.')).toBeInTheDocument();
+  fetchMock.mockResolvedValue({ok:true,json:async()=>({id:9,chapter_index:0,text:'handsome, clever',anchor:'quote:handsome',color:'yellow',note:'Updated margin note.'})});
+  await userEvent.click(screen.getByRole('button',{name:'Edit note'}));
+  const box=screen.getByRole('textbox',{name:'Margin note'});
+  await userEvent.clear(box);
+  await userEvent.type(box,'Updated margin note.');
+  await userEvent.click(screen.getByRole('button',{name:'Save note'}));
+  expect(await screen.findByText('Updated margin note.')).toBeInTheDocument();
 });
 test('on mobile the toolbar carries every control and contents starts closed',async()=>{
   Object.defineProperty(window,'matchMedia',{configurable:true,value:vi.fn().mockReturnValue({matches:true,addEventListener:vi.fn(),removeEventListener:vi.fn()})});

@@ -1,13 +1,12 @@
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 import mimetypes, os, re, uuid, zipfile, httpx
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 from .database import Base, engine, get_db
-from .models import Book, Chapter, Progress, Highlight, Bookmark, Setting
+from .models import Book, Chapter, Progress, Highlight, Bookmark, Setting, utcnow
 from .schemas import ProgressIn, HighlightIn, BookmarkIn, AskIn, SettingsIn, NoteIn
 from .services.parsers import parse_book
 
@@ -54,10 +53,12 @@ def get_book(book_id:int, db:Session):
 @app.get("/api/health")
 def health(): return {"status":"ok"}
 @app.get("/api/books")
-def list_books(db:Session=Depends(get_db)): return [serialize(x) for x in db.scalars(select(Book).order_by(Book.created_at.desc())).all()]
+def list_books(db:Session=Depends(get_db)):
+    stmt=select(Book).options(selectinload(Book.chapters),selectinload(Book.progress),selectinload(Book.highlights),selectinload(Book.bookmarks)).order_by(Book.created_at.desc())
+    return [serialize(x) for x in db.scalars(stmt).all()]
 @app.get("/api/books/{book_id}")
 def read_book(book_id:int, db:Session=Depends(get_db)):
-    book=get_book(book_id,db); book.last_opened_at=datetime.utcnow(); db.commit(); return serialize(book)
+    book=get_book(book_id,db); book.last_opened_at=utcnow(); db.commit(); return serialize(book)
 @app.post("/api/books",status_code=201)
 async def upload_book(file:UploadFile=File(...),db:Session=Depends(get_db)):
     data=await file.read()
@@ -86,7 +87,7 @@ def delete_book(book_id:int,db:Session=Depends(get_db)):
     db.commit(); path.unlink(missing_ok=True); return Response(status_code=204)
 @app.put("/api/books/{book_id}/progress")
 def save_progress(book_id:int,data:ProgressIn,db:Session=Depends(get_db)):
-    book=get_book(book_id,db); p=book.progress or Progress(book_id=book_id); p.chapter_index=data.chapter_index;p.locator=data.locator;p.percentage=max(0,min(100,data.percentage));p.updated_at=datetime.utcnow();db.add(p);db.commit();return {"chapter_index":p.chapter_index,"locator":p.locator,"percentage":p.percentage}
+    book=get_book(book_id,db); p=book.progress or Progress(book_id=book_id); p.chapter_index=data.chapter_index;p.locator=data.locator;p.percentage=max(0,min(100,data.percentage));p.updated_at=utcnow();db.add(p);db.commit();return {"chapter_index":p.chapter_index,"locator":p.locator,"percentage":p.percentage}
 @app.post("/api/books/{book_id}/highlights",status_code=201)
 def add_highlight(book_id:int,data:HighlightIn,db:Session=Depends(get_db)):
     get_book(book_id,db); h=Highlight(book_id=book_id,**data.model_dump());db.add(h);db.commit();db.refresh(h);return {"id":h.id,**data.model_dump()}
@@ -149,17 +150,27 @@ def free_models():
     try: data=httpx.get(f"{OPENROUTER}/models",timeout=15).raise_for_status().json()["data"]
     except Exception: return [{"id":DEFAULT_MODEL,"name":DEFAULT_MODEL}]
     return sorted(({"id":m["id"],"name":m.get("name") or m["id"]} for m in data if m["id"].endswith(":free")),key=lambda m:m["name"])
+STOPWORDS={"about","after","again","also","been","before","being","between","book","both","chapter","could","does","each","explain","from","give","happened","have","here","into","just","main","make","matter","more","most","much","must","only","other","over","passage","people","read","same","should","simplify","some","such","summarize","summarise","tell","than","that","their","them","then","there","these","they","this","those","through","under","very","waited","what","when","where","which","while","whom","whose","with","would","your"}
+def _window(text:str,terms:set[str],size:int) -> str:
+    low=text.lower()
+    hits=[low.find(t) for t in terms if low.find(t)>=0]
+    if not hits or len(text)<=size: return text[:size]
+    start=max(0,min(min(hits)-size//4,len(text)-size))
+    return ("…" if start else "")+text[start:start+size]+("…" if start+size<len(text) else "")
+
 @app.post("/api/books/{book_id}/ask")
 def ask_book(book_id:int,data:AskIn,db:Session=Depends(get_db)):
     get_book(book_id,db); stmt=select(Chapter).where(Chapter.book_id==book_id)
     if data.spoiler_protection: stmt=stmt.where(Chapter.position<=data.chapter_index)
-    chapters=db.scalars(stmt.order_by(Chapter.position)).all();terms=set(re.findall(r"[^\W\d_]{4,}",f"{data.question} {data.selected_text}".lower()))
+    chapters=db.scalars(stmt.order_by(Chapter.position)).all()
+    raw_terms=set(re.findall(r"[^\W\d_]{4,}",f"{data.question} {data.selected_text}".lower()))
+    terms=(raw_terms-STOPWORDS) or raw_terms
     # ties (a short question, no usable terms) go to the chapters nearest the reader, not the opening ones
     ranked=sorted(chapters,key=lambda c:(sum(c.content.lower().count(t) for t in terms),c.position<=data.chapter_index,c.position),reverse=True)[:3]
-    sources=[{"chapter_index":c.position,"chapter":c.title,"excerpt":c.content[:260]} for c in ranked]
+    sources=[{"chapter_index":c.position,"chapter":c.title,"excerpt":_window(c.content,terms,260)} for c in ranked]
     context=data.selected_text or (sources[0]["excerpt"] if sources else "the text read so far")
     if not openrouter_key(db): return {"answer":f"Based on the book, this passage points to: {context[:300]}","sources":sources,"mock":True}
-    prompt=("Excerpts from the book:\n\n"+"\n\n".join(f"[{c.title}]\n{c.content[:2000]}" for c in ranked)
+    prompt=("Excerpts from the book:\n\n"+"\n\n".join(f"[{c.title}]\n{_window(c.content,terms,2000)}" for c in ranked)
       +f"\n\nSelected passage:\n{data.selected_text or '(none)'}\n\nQuestion: {data.question}")
     system=("You answer questions about a book using only the excerpts supplied. If they do not contain the answer, say so plainly instead of guessing. "
       f"The reader is partway through chapter {data.chapter_index+1} — never mention anything beyond the excerpts. Under 150 words, no preamble.")
@@ -170,7 +181,7 @@ def ask_book(book_id:int,data:AskIn,db:Session=Depends(get_db)):
 # because it is built only from chapters already read it cannot spoil anything by construction.
 LETTER=r"[^\W\d_]"  # unicode-aware, so Schrödinger is one word and not "Schr"
 WORD=re.compile(rf"{LETTER}(?:{LETTER}|[’'-]){{2,}}")
-RUN=re.compile(rf"(?:[A-Z](?:{LETTER}|[’'-]){{2,}}\s+){{0,2}}[A-Z](?:{LETTER}|[’'-]){{2,}}")
+RUN=re.compile(rf"(?:(?![a-z]){LETTER}(?:{LETTER}|[’'-]){{2,}}\s+){{0,2}}(?![a-z]){LETTER}(?:{LETTER}|[’'-]){{2,}}")
 def _stem(word:str): return re.sub(r"[’']s$","",word.lower())  # Einstein and Einstein's are one person
 @app.get("/api/books/{book_id}/dossier")
 def dossier(book_id:int,chapter_index:int=0,db:Session=Depends(get_db)):
@@ -187,7 +198,7 @@ def dossier(book_id:int,chapter_index:int=0,db:Session=Depends(get_db)):
             if re.match(r"\s+[\dIVX]",c.content[m.end():m.end()+3]): label[stem]+=1  # "Chapter 6", "Figure 3.1"
     # a name is capitalised almost always, is not only a sentence opener ("However"), and is not a
     # cross-reference label — those are always followed by a number
-    named=lambda w:(s:=_stem(w)) and upper[s]>=4 and upper[s]>=5*lower[s] and opener[s]<.9*upper[s] and label[s]<.5*upper[s]
+    named=lambda w:w[0].isupper() and (s:=_stem(w)) and upper[s]>=4 and upper[s]>=5*lower[s] and opener[s]<.9*upper[s] and label[s]<.5*upper[s]
     entries={}
     for c in chapters:
         for run in RUN.finditer(c.content):
@@ -210,7 +221,7 @@ def recap(book_id:int,chapter_index:int=0,refresh:bool=False,db:Session=Depends(
     if not openrouter_key(db):  # no key: the last whole sentences of the chapter you finished
         tail=" ".join(re.split(r"(?<=[.!?])\s+",read[-1].content[-460:])[1:]).strip() or read[-1].content[-320:].strip()
         return {"recap":f"You stopped after “{read[-1].title}”. {tail}","chapters":len(read),"mock":True}
-    prompt="\n\n".join(f"[{c.title}]\n{c.content[:3000]}" for c in read[-4:])
+    prompt="\n\n".join(f"[{c.title}]\n{c.content if len(c.content)<=3000 else c.content[:1500]+'\\n…\\n'+c.content[-1500:]}" for c in read[-4:])
     system=("Remind a reader what happened in the part of the book they have already read, so they can pick it back up. "
       "Second person, present tense, 3 short sentences, no preamble, no spoilers beyond the excerpts given.")
     answer,failed=chat(db,system,prompt,320)

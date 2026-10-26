@@ -20,7 +20,7 @@ export default function App(){
  useEffect(()=>{if(!error)return;const t=setTimeout(()=>setError(''),6000);return()=>clearTimeout(t)},[error]);
  const upload=async(f:File)=>{setError('');setBusy(true);try{const b=await api.upload(f);setBooks(v=>[b,...v]);setActive(b)}catch(e){setError(message(e,'Upload failed'))}finally{setBusy(false)}};
  // ponytail: delete stays local for 8s, so Undo is a state revert instead of a re-upload
- const remove=(book:Book)=>{setBooks(v=>v.filter(b=>b.id!==book.id));setUndo({book,timer:window.setTimeout(()=>{setUndo(u=>u?.book.id===book.id?null:u);api.remove(book.id).catch(e=>{setError(message(e,'Delete failed'));setBooks(v=>[book,...v])})},8000)})};
+ const remove=(book:Book)=>{if(undo){clearTimeout(undo.timer);api.remove(undo.book.id).catch(()=>{})}setBooks(v=>v.filter(b=>b.id!==book.id));setUndo({book,timer:window.setTimeout(()=>{setUndo(u=>u?.book.id===book.id?null:u);api.remove(book.id).catch(e=>{setError(message(e,'Delete failed'));setBooks(v=>[book,...v])})},8000)})};
  const restore=()=>{if(!undo)return;clearTimeout(undo.timer);setBooks(v=>[undo.book,...v]);setUndo(null)};
  // GET marks the book opened, which is what "Recently read" sorts by
  const open=(b:Book)=>{setActive(b);api.book(b.id).catch(()=>{})};
@@ -57,7 +57,7 @@ function paint(text:string,marks:Mark[],open:(h:Highlight,x:number,y:number)=>vo
  const out:ReactNode[]=[];let at=0;
  for(;;){
   let best=-1,hit:Mark|undefined;
-  for(const m of marks){const i=text.indexOf(m.frag,at);if(i>=0&&(best<0||i<best)){best=i;hit=m}}
+  for(const m of marks){const i=text.indexOf(m.frag,at);if(i>=0&&(best<0||i<best||(i===best&&m.frag.length>(hit?.frag.length||0)))){best=i;hit=m}}
   if(!hit)break;
   const{h}=hit;
   if(best>at)out.push(text.slice(at,best));
@@ -68,7 +68,7 @@ function paint(text:string,marks:Mark[],open:(h:Highlight,x:number,y:number)=>vo
 }
 
 function Reader({initial,theme,setTheme,onBack}:{initial:Book;theme:Theme;setTheme:(t:Theme)=>void;onBack:()=>void}){
- const[book,setBook]=useState(initial),[chapter,setChapter]=useState(initial.progress.chapter_index||0),[toc,setToc]=useState(()=>!isMobile()),[ai,setAi]=useState(false),[settings,setSettings]=useState(false),[size,setSize]=useState(prefs.size||(isMobile()?17:19)),[line,setLine]=useState(prefs.line||1.7),[sel,setSel]=useState<{text:string;x:number;y:number;below:boolean;arrow:number}|null>(null),[tab,setTab]=useState<'contents'|'highlights'|'people'>('contents'),[search,setSearch]=useState(false),[query,setQuery]=useState(''),[results,setResults]=useState<{chapter_index:number;chapter:string;excerpt:string}[]|null>(null),[searching,setSearching]=useState(false),[page,setPage]=useState(0),[pages,setPages]=useState(1),[toast,setToast]=useState(''),[note,setNote]=useState<{h:Highlight;x:number;y:number}|null>(null),[people,setPeople]=useState<Entry[]|null>(null),[open,setOpen]=useState(''),[seed,setSeed]=useState(''),[passage,setPassage]=useState(''),[recap,setRecap]=useState(''),[speaking,setSpeaking]=useState(false);
+ const[book,setBook]=useState(initial),[chapter,setChapter]=useState(initial.progress.chapter_index||0),[toc,setToc]=useState(()=>!isMobile()),[ai,setAi]=useState(false),[settings,setSettings]=useState(false),[size,setSize]=useState(prefs.size||(isMobile()?17:19)),[line,setLine]=useState(prefs.line||1.7),[sel,setSel]=useState<{text:string;x:number;y:number;below:boolean;arrow:number}|null>(null),[tab,setTab]=useState<'contents'|'highlights'|'people'>('contents'),[search,setSearch]=useState(false),[query,setQuery]=useState(''),[results,setResults]=useState<{chapter_index:number;chapter:string;excerpt:string}[]|null>(null),[searching,setSearching]=useState(false),[page,setPage]=useState(0),[pages,setPages]=useState(1),[toast,setToast]=useState(''),[note,setNote]=useState<{h:Highlight;x:number;y:number;editing?:boolean;draft?:string}|null>(null),[people,setPeople]=useState<Entry[]|null>(null),[open,setOpen]=useState(''),[seed,setSeed]=useState(''),[passage,setPassage]=useState(''),[recap,setRecap]=useState(''),[speaking,setSpeaking]=useState(false);
  const art=useRef<HTMLElement>(null),head=useRef<HTMLParagraphElement>(null),tail=useRef<HTMLSpanElement>(null),backwards=useRef(false),seek=useRef(''),down=useRef({x:0,y:0,touch:false}),wheelAt=useRef(0);
  // resume lands where you stopped in the chapter you stopped in — as a fraction, since a phone
  // and a laptop cut the same chapter into different numbers of pages
@@ -94,8 +94,8 @@ function Reader({initial,theme,setTheme,onBack}:{initial:Book;theme:Theme;setThe
    let want=r.of>1?Math.min(n-1,Math.round(r.page/r.of*n)):Math.min(r.page,n-1);
    if(seek.current){const at=pageOf(seek.current);seek.current='';if(at>=0)want=Math.min(at,n-1)}
    setPages(n);setPage(p=>want?want:last?n-1:Math.min(p,n-1))};
-  measure();document.fonts?.ready.then(measure);
-  const observer=new ResizeObserver(measure);observer.observe(el);return()=>observer.disconnect()},[current?.id,size,line,chapter]);
+  measure();document.fonts?.ready.then(measure);el.addEventListener('load',measure,true);
+  const observer=new ResizeObserver(measure);observer.observe(el);return()=>{el.removeEventListener('load',measure,true);observer.disconnect()}},[current?.id,size,line,chapter]);
  // one way to land anywhere: a chapter, then either a saved page fraction or a passage to find
  const jump=(ch:number,{loc='',text=''}:{loc?:string;text?:string}={})=>{setRecap('');setSearch(false);if(isMobile())setToc(false);
   const r=parse(loc);
@@ -153,6 +153,7 @@ function Reader({initial,theme,setTheme,onBack}:{initial:Book;theme:Theme;setThe
    const saved=await api.note(h.id,{note:r.answer});setBook(b=>({...b,highlights:b.highlights.map(x=>x.id===h.id?saved:x)}));setToast('Note added')}
   catch{setToast('Could not add note')}};
  const copy=(text:string)=>{navigator.clipboard?.writeText(text).then(()=>setToast('Copied'),()=>setToast('Could not copy'));setSel(null)};
+ const saveNote=async()=>{if(!note)return;try{const saved=await api.note(note.h.id,{note:(note.draft||'').trim()});setBook(b=>({...b,highlights:b.highlights.map(x=>x.id===saved.id?saved:x)}));setNote({h:saved,x:note.x,y:note.y});setToast(saved.note?'Note saved':'Note cleared')}catch{setToast('Could not save note')}};
  const drop=(h:Highlight)=>{setNote(null);setBook(b=>({...b,highlights:b.highlights.filter(x=>x.id!==h.id)}));api.unhighlight(h.id).catch(()=>setToast('Could not remove'))};
  const doSearch=async()=>{const q=query.trim();if(!q)return;setSearching(true);try{setResults(await api.search(book.id,q))}catch{setResults(null);setToast('Search failed')}finally{setSearching(false)}};
  const canSpeak='speechSynthesis'in window;
@@ -181,7 +182,7 @@ function Reader({initial,theme,setTheme,onBack}:{initial:Book;theme:Theme;setThe
    {recap&&<div className="recap-card" role="status"><strong><Sparkles/> Where you left off</strong><p>{recap}</p><button className="primary small" onClick={()=>setRecap('')}>Continue reading</button></div>}
   </div>
   {sel&&<div className={`selection-menu${sel.below?' below':''}`} role="toolbar" aria-label="Selection actions" style={{left:sel.x,top:sel.y,'--arrow':`${sel.arrow}px`} as CSSProperties} onMouseDown={e=>e.preventDefault()}><button onClick={()=>addHighlight()}><Highlighter/> Highlight</button><button onClick={explain}><Sparkles/> Explain</button><button onClick={()=>{setPassage(sel.text);setAi(true);setSel(null)}}><MessageCircle/> Ask AI</button><button onClick={()=>copy(sel.text)}><Copy/> Copy</button></div>}
-  {note&&<><button className="note-scrim" aria-label="Close note" onClick={()=>setNote(null)}/><div className="note-pop" role="dialog" aria-label="Highlight" style={{left:Math.min(Math.max(note.x,160),innerWidth-160),top:Math.min(note.y+16,innerHeight-200)}}><blockquote>{note.h.text}</blockquote>{note.h.note?<p>{note.h.note}</p>:<p className="muted">No note yet.</p>}<div><button className="linkish" onClick={()=>askAbout('Tell me more about this passage.',note.h.text)}>Ask more</button><button className="linkish" onClick={()=>copy(note.h.text)}>Copy</button><button className="linkish danger" onClick={()=>drop(note.h)}>Remove</button></div></div></>}
+  {note&&<><button className="note-scrim" aria-label="Close note" onClick={()=>setNote(null)}/><div className="note-pop" role="dialog" aria-label="Highlight" style={{left:Math.min(Math.max(note.x,160),innerWidth-160),top:Math.min(note.y+16,innerHeight-200)}}><blockquote>{note.h.text}</blockquote>{note.editing?<><textarea aria-label="Margin note" autoFocus rows={3} placeholder="Write a margin note…" value={note.draft||''} onChange={e=>setNote({...note,draft:e.target.value})}/><div><button className="linkish" onClick={saveNote}>Save note</button><button className="linkish" onClick={()=>setNote({...note,editing:false})}>Cancel</button></div></>:<>{note.h.note?<p>{note.h.note}</p>:<p className="muted">No note yet.</p>}<div><button className="linkish" onClick={()=>setNote({...note,editing:true,draft:note.h.note||''})}>{note.h.note?'Edit note':'Add note'}</button><button className="linkish" onClick={()=>askAbout('Tell me more about this passage.',note.h.text)}>Ask more</button><button className="linkish" onClick={()=>copy(note.h.text)}>Copy</button><button className="linkish danger" onClick={()=>drop(note.h)}>Remove</button></div></>}</div></>}
   {settings&&<div className="settings-pop" role="dialog" aria-label="Reader appearance"><div className="popover-head"><strong>Appearance</strong><button className="icon" aria-label="Close appearance" onClick={()=>setSettings(false)}><X/></button></div>
    <label>Theme</label><div className="theme-row">{THEMES.map(([id,label])=><button key={id} aria-pressed={theme===id} onClick={()=>setTheme(id)} className={theme===id?'active':''}><span className={`swatch ${id}`} aria-hidden="true">Aa</span>{label}</button>)}</div>
    <label htmlFor="size">Text size <output>{size}px</output></label><div className="range"><small aria-hidden="true">A</small><input id="size" type="range" min="15" max="28" value={size} onChange={e=>setSize(+e.target.value)}/><span aria-hidden="true">A</span></div>

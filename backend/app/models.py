@@ -1,7 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Text, Float, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
+
+utcnow = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
 
 class Book(Base):
     __tablename__ = "books"
@@ -11,7 +13,7 @@ class Book(Base):
     format: Mapped[str] = mapped_column(String(20))
     filename: Mapped[str] = mapped_column(String(500))
     cover_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     chapters: Mapped[list["Chapter"]] = relationship(cascade="all, delete-orphan", order_by="Chapter.position")
     progress: Mapped["Progress | None"] = relationship(cascade="all, delete-orphan")
@@ -33,7 +35,7 @@ class Progress(Base):
     chapter_index: Mapped[int] = mapped_column(Integer, default=0)
     locator: Mapped[str] = mapped_column(String(500), default="")
     percentage: Mapped[float] = mapped_column(Float, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 class Highlight(Base):
     __tablename__ = "highlights"
